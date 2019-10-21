@@ -1874,7 +1874,10 @@ static obj_t *print_die(struct cu_ctx *ctx,
 			= record_db_lookup_or_init(conf->db, file);
 
 		if (is_declaration(die)) {
-			ref_obj->ref_record = record_list_decl_dummy(rec_list);
+			struct record *dummy = record_list_decl_dummy(rec_list);
+
+			ref_obj->depend_rec_node = list_add(&dummy->dependents, ref_obj);
+			ref_obj->ref_record = dummy;
 		} else {
 			struct record *processed = hash_find(cu_db, file);
 
@@ -2484,6 +2487,36 @@ bool record_db_merge_pairs(struct hash *hash)
 	return merged;
 }
 
+
+/**
+ * Merge declaration with concrete record, if it is the only one.
+ */
+void record_db_merge_declarations(struct hash *hash) {
+	struct hash_iter iter;
+	const void *val;
+
+	hash_iter_init(hash, &iter);
+	while (hash_iter_next(&iter, NULL, &val)) {
+		struct record_list *rec_list
+			= (struct record_list *)val;
+
+		if (rec_list == NULL)
+			continue;
+
+		if (rec_list->records->len == 1) {
+			struct record *only = rec_list->records->first->data;
+			struct list_node *node;
+
+			LIST_FOR_EACH(&rec_list->decl_dummy->dependents, node) {
+				obj_t *obj = node->data;
+
+				obj->depend_rec_node = list_add(&only->dependents, obj);
+				obj->ref_record = only;
+			}
+		}
+	}
+}
+
 void record_db_merge(struct record_db *db)
 {
 	bool first = true;
@@ -2534,6 +2567,8 @@ void record_db_merge(struct record_db *db)
 		record_list_clean_up(rec_list);
 		record_list_restore_postponed(rec_list);
 	}
+
+	record_db_merge_declarations(hash);
 }
 
 /*
