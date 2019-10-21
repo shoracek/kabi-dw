@@ -98,7 +98,53 @@ struct file_ctx {
 	struct ksymtab *ksymtab; /* ksymtab of the current kernel module */
 	unsigned char dw_version : 6;
 	unsigned char elf_endian : 2;
+
+	struct hash *white_externs; // TODO: put into different struct, and
+				    // different name
 };
+
+static int is_external(Dwarf_Die *die);
+void white_externs_fill(struct hash *whex, struct file_ctx *fctx, Dwfl_Module *dwflmod) {
+	assert(whex != NULL);
+
+	Dwarf_Addr dwbias;
+	Dwarf *dbg = dwfl_module_getdwarf(dwflmod, &dwbias);
+
+	Dwarf_Off off = 0;
+	Dwarf_Off type_offset = 0;
+	Dwarf_Half version;
+	size_t hsize;
+	Dwarf_Off abbrev;
+	uint8_t addresssize;
+	uint8_t offsetsize;
+
+	while (dwarf_next_unit(dbg, off, &off, &hsize, &version, &abbrev,
+			       &addresssize, &offsetsize, NULL, &type_offset) == 0) {
+		/* CU is followed by a single DIE */
+		Dwarf_Die cu_die;
+		Dwarf_Die child_die;
+
+		if (!dwarf_haschildren(&cu_die))
+			continue;
+
+		dwarf_child(&cu_die, &child_die);
+		do {
+			struct ksym *ksym = NULL;
+			const char *name = dwarf_diename(&child_die);
+
+			if (name == NULL) {
+				continue;
+			}
+
+			ksym = ksymtab_find(fctx->ksymtab, name);
+			if (ksym && is_external(&child_die)) {
+				const char *key = global_string_get_copy(name);
+				hash_add(whex, key, key);
+			}
+		} while (dwarf_siblingof(&child_die, &child_die) == 0);
+	}
+}
+
 
 struct dwarf_type {
 	unsigned int dwarf_tag;
@@ -1938,7 +1984,7 @@ static bool is_symbol_valid(struct file_ctx *fctx, Dwarf_Die *die)
 		goto out;
 
 	/* We don't care about declarations */
-	if (is_declaration(die))
+	if (is_declaration(die) && hash_find(fctx->white_externs, name) == NULL)
 		goto out;
 	/*
 	 * Mark the symbol as not eligible to fake symbol generation.
@@ -2031,6 +2077,7 @@ static void process_cu_die(Dwarf_Die *cu_die, struct file_ctx *fctx)
 
 		/* Print both the CU DIE and symbol DIE */
 		ref = print_die(&ctx, NULL, &child_die);
+
 		record_db_add_cu(conf->db, ctx.cu_db);
 
 		obj_free(ref);
@@ -2065,6 +2112,9 @@ static int dwflmod_generate_cb(Dwfl_Module *dwflmod, void **userdata,
 	Dwarf_Off abbrev;
 	uint8_t addresssize;
 	uint8_t offsetsize;
+
+	fctx->white_externs = hash_new(PROCESSED_SIZE, NULL);
+	white_externs_fill(fctx->white_externs, fctx, dwflmod);
 
 	while (dwarf_next_unit(dbg, off, &off, &hsize, &version, &abbrev,
 	    &addresssize, &offsetsize, NULL, &type_offset) == 0) {
